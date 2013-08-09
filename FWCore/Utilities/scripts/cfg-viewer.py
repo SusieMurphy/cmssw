@@ -4,7 +4,6 @@ import re
 import collections
 import FWCore.ParameterSet.Config as cms
 import FWCore.ParameterSet.SequenceTypes as seq
-## doing types
 
 class unscheduled:
   def __init__(self,cfgFile,html,quiet,helperDir,fullDir):
@@ -13,17 +12,21 @@ class unscheduled:
     self._theDir= fullDir
     self._helperDir = helperDir
     self._mother,self._daughter ={},{}
-    self._reg = re.compile("<|>|'")
-    self._dictParent,self._modSeqParent = "DictParent","ModuleSeqParent"
-    self._prodConsumParent = "ProdConsumParent"
+    self._reg = re.compile("['>]")
+    self._data,self._types,self._genericTypes={},{},{}
+    self._dictP ="DictParent"
+    self._modSeqP = "ModuleSeqParent"
+    self._prodConsP=  "ProdConsumParent"
+    self._parents = {
+    "DictParent":{"creator":"dictCreate","simple": True},
+    "ModuleSeqParent":{"creator":"modSeqCreate","simple": False},
+    "ProdConsumParent":{"creator":"prodConCreate","simple": False}
+    }
+    for name,x in self._parents.iteritems():
+      x["pfile"] = self._filenames(name)
+      x["cfile"] = self._filenames(x["creator"])
     self._type = "%stypes.js"%(fullDir)
     self._allJSFiles =["types.js"]
-    self._data,self._types,self._genericTypes={},{},{}
-    self._simpleData,self._complexData="simpleData", "complexData"
-    self._prodConsumData = "prodData"
-    self._simpleFile, self._complexFile = ["%s%s.js"%(self._theDir, 
-                            x) for x in [self._simpleData,self._complexData]] 
-    self._prodConsumFile = "%s%s.js"%(self._theDir,self._prodConsumData)
     self._config= ConfigDataAccessor.ConfigDataAccessor()
     self._config.open(cfgFile)
     self._proceed()
@@ -67,95 +70,101 @@ class unscheduled:
     if(self._quiet):print "calculated: %s."%(", ".join(calc))
     self._producersConsumers()
 
-  # Get the data for data which is a SequenceType
-  def _doSequenceTypes(self,paths,name):
-    theDataFile = self._calcFilenames(name)
-    fullDataFile = "%s%s"%(self._theDir,theDataFile)
-    topLevel = self._calcFilenames("top-"+name)
-    fullTopLevel = "%s%s"%(self._theDir,topLevel)
+  # Get the data for items which are SequenceTypes
+  def _doSequenceTypes(self,paths,namep):
+    theDataFile,fullDataFile = self._calcFilenames(namep)
+    topLevel,fullTopLevel = self._calcFilenames("top-"+namep)
     json = [topLevel,theDataFile]
-    cap = name.capitalize()
+    cap = namep.capitalize()
     bl={}
     types = False
-    foundany=False
     with open(fullDataFile,'w') as data:
       data.write("{")
       v = visitor(data)  
-      for value in paths:
+      for item in paths:
         if(not types):
-          generic, spec = re.sub("['>]", "", 
-                             str(value.__class__)).split(".")[-2:]
-          doTypes(spec,generic)
-          self._saveData(spec,self._complexData,json) 
+          spec = self._checkType(item)
+          self._saveData(spec,self._parents[self._modSeqP]["creator"],json) 
           types = True
-        # Dont think we need to check for this here.
-        mo =self._config.motherRelations(value)
-        dau = self._config.daughterRelations(value)
-        if(mo or dau and not foundany):
-          self._mother[name] = [self._config.label(i) for i in mo]
-          self._daughter[name] = [self._config.label(i) for i in dau]
-          foundany = True
-        key = self._config.label(value)
-        value.visit(v)
+        name = self._config.label(item)
+        # Dont think we need to check for this here. 
+        self._mothersDaughters(name,item)
+        key = self._config.label(item)
+        item.visit(v)
         bl[key]= getParamSeqDict(v._finalExit(),
-                    self._config.filename(value), "")
+                    self._config.filename(item), "")
       data.write("}")
       with open(fullTopLevel, 'w') as other:
         other.write(JSONFormat(bl))
 
-  def _doNonSequenceType(self,items, globalType):
+  # Check type of item and return the specofic type
+  def _checkType(self,item):
+    gen, spec = re.sub(self._reg, "", 
+                             str(item.__class__)).split(".")[-2:]
+    doTypes(spec,gen)
+    return spec
+
+  # find the mothers and daughters, storing them
+  def _mothersDaughters(self,name, item):
+    mo =self._config.motherRelations(item)
+    dau = self._config.daughterRelations(item)
+    if(mo):
+      self._mother[name] = [self._config.label(i) for i in mo]
+    if(dau):
+      self._daughter[name] = [self._config.label(i) for i in dau]
+
+  # Find data for objs which are not SequenceTypes
+  def _doNonSequenceType(self,objs, globalType):
     everything={}
-    foundany=False
-    types = False
-    theDataFile =self._calcFilenames(globalType)
-    fullDataFile = "%s%s"%(self._theDir,theDataFile)
-    always = False
+    always= types = False
+    theDataFile, fullDataFile =self._calcFilenames(globalType)
+    # For modules types can be diff 
+    # so we always want to call the doTypes method
     if(globalType =="modules"):
-      self._saveData(globalType.capitalize(),self._simpleData,[theDataFile]) 
-      always = True
-      types = True
-    for each in items:
+      self._saveData(globalType.capitalize(),
+                     self._parents[self._dictP]["creator"],
+                     [theDataFile]) 
+      always = types = True
+    for item in objs:
       if(always or not types):
-        generic, spec = re.sub("['>]", "", 
-                          str(each.__class__)).split(".")[-2:]
-        doTypes(spec,generic)
+        spec = self._checkType(item)
         if(not types):
-          self._saveData(spec,self._simpleData,[theDataFile]) 
+          self._saveData(spec,self._parents[self._dictP]["creator"],
+                         [theDataFile]) 
           types = True
-      name = self._config.label(each)
-      mo =self._config.motherRelations(each)
-      dau = self._config.daughterRelations(each)
-      if(mo or dau and not foundany):
-        foundany = True
-        self._mother[name] = [self._config.label(i) for i in mo]
-        self._daughter[name] = [self._config.label(i) for i in dau]
-      filename = self._config.filename(each)
-      theType = self._config.type(each)
-      if(isinstance(each,cms._Parameterizable)):
-        out = getParameters(each.parameters_())
-      elif(isinstance(each,cms._ValidatingListBase)):
-        out = listBase(each)
-      everything[name] = getParamSeqDict(out, filename, theType)
+      name = self._config.label(item)
+      self._mothersDaughters(name, item)
+      if(isinstance(item,cms._Parameterizable)):
+        out = getParameters(item.parameters_())
+      elif(isinstance(item,cms._ValidatingListBase)):
+        out = listBase(item)
+      everything[name] = getParamSeqDict(out,
+                           self._config.filename(item),
+                           self._config.type(item))
     with open(fullDataFile,'w') as dataFile:
       dataFile.write(JSONFormat(everything))
 
+  # Return json data file names
   def _calcFilenames(self,name):
-    return "data-%s.json"%(name)
+    return self._filenames(name,"data-%s.json")
 
+  # Return filenames
+  def _filenames(self,name,option=""):
+    if(option): basicName = option%(name)
+    else: basicName = "%s.js"%(name)
+    return (basicName, "%s%s"%(self._theDir,basicName))
+
+  # write out mothers and daughters (producers/consumers).
   def _producersConsumers(self):
     if(not self._mother and not self._daughter):
-      return
-    # TODO should really make this dynamic incase name changes.    
+      return  
     for name,theDict in {"producer":self._mother, 
                          "consumer":self._daughter}.iteritems():
-      thedataFile = self._calcFilenames(name)
-      fulldataFile = "%s%s"%(self._theDir,thedataFile)
-      self._saveData(name.capitalize(),self._prodConsumData,
-                      [thedataFile,"data-modules.json"]) 
-      #               "%s %s"%(thedataFile,"data-modules.json")) 
+      thedataFile , fulldataFile = self._calcFilenames(name)
+      self._saveData(name.capitalize(),self._parents[self._prodConsP]["creator"],
+                      [thedataFile,self._calcFilenames("modules")[0]]) 
       with open(fulldataFile,'w') as moth:
         moth.write(JSONFormat(theDict))
-
   def _saveData(self,name,base,jsonfiles):
     jsonfiles = " ".join(["%s%s"%(self._helperDir,x)for x in jsonfiles])
     temp={}
@@ -163,14 +172,9 @@ class unscheduled:
     temp["data-files"] = jsonfiles
     self._data[name] = temp
 
-  #TODO make nicer
+  # Create objs and print out .js files for
+  # each type of items we have.
   def _createObjects(self):
-    self._allJSFiles.append("%s.js"%(self._simpleData))
-    #self._allJSFiles.append(self._complexFile)
-    #self._allJSFiles.append(self._prodConsumFile)
-    self._allJSFiles.append("%s.js"%(self._complexData))
-    self._allJSFiles.append("%s.js"%(self._prodConsumData))
-
     base = "obj= Object.create(new %s(%s));"
     format="""
     function %s(%s){
@@ -180,33 +184,31 @@ class unscheduled:
     }
     """
     name = "data"
-    paramName="modules"
-    simple = base%(self._dictParent,name)
-    with open(self._simpleFile, 'w') as setUp:
-      setUp.write(format%(self._simpleData,paramName,self._load(
-                                           name,paramName,simple)))
-    
-    secName = "topL"
-    paramName=["modules","topLevel"]
-    complexOne = base%(self._modSeqParent,"%s,%s"%(name, secName))
-    with open(self._complexFile, 'w') as setUp:
-      setUp.write(format%(self._complexData,", ".join(paramName),
-                    self._load(name,paramName[0],
-                    self._load(secName, paramName[1],complexOne))))
+    for pname,x in self._parents.iteritems():
+      simple = base%(pname,name)
+      filename,fullfilename= x["cfile"]
+      self._allJSFiles.append(filename)
+      if(x["simple"]):
+        paramName="modules"
+        with open(fullfilename, 'w') as setUp:
+          setUp.write(format%(x["creator"],paramName,self._load(
+                                             name,paramName,simple)))
+        continue
+      secName = "topL"
+      paramName=["modules","topLevel"]
+      complexOne = base%(pname,"%s,%s"%(name, secName))
+      with open(fullfilename, 'w') as setUp:
+        setUp.write(format%(x["creator"],", ".join(paramName),
+                      self._load(name,paramName[0],
+                      self._load(secName, paramName[1],complexOne))))
 
-    secName = "topL"
-    paramName=["modules","topLevel"]
-    complexOne = base%(self._prodConsumParent,"%s,%s"%(name, secName))
-    with open(self._prodConsumFile , 'w') as setUp:
-      setUp.write(format%(self._prodConsumData,", ".join(paramName),
-                    self._load(name,paramName[0],
-                    self._load(secName, paramName[1],complexOne))))
-
+  # return the .js code for loading json files in a string
   def _load(self,name,param,inner):
     return"""
       loadJSON(%s).done(function(%s){\n%s\n});
     """%(param,name,inner)
 
+  # The parent class for non SequenceTypes
   def _writeDictParent(self, typeName):
     exVar ='this.%(key)sKey= "%(key)s";'
     exFunc ="""
@@ -219,6 +221,9 @@ class unscheduled:
   return this.getFeature(key,this.%(key)sKey);
 }
     """
+    search = """%(name)s.prototype.search%(key)s = function(reg,term,replce){
+  return this.generalSearch(reg,term,replce,this.%(key)sKey);
+}  """
     extra= """
     /**
     /**
@@ -252,14 +257,19 @@ DictParent.prototype.getInnerParams = function(parents, index){
     """
     functs=""
     variables =""
+    name = self._dictP
+    data = self._parents[name]
+    fileName, fullfileName= data["pfile"]
     for feature in dictFeatures:
-      functs +=exFunc%{"key":feature,"name":self._dictParent}
+      d = {"key": feature, "name": name}
+      variables +=exVar%d
+      functs +=exFunc%d
       if(feature == "Parameters"):
-        functs +=extra%{"key": feature, "name":self._dictParent}
-      variables +=exVar%{"key": feature}
-    fileName= "%s%s.js"%(self._theDir, self._dictParent)
-    self._allJSFiles.append("%s.js"%(self._dictParent))
-    with open(fileName, 'w') as parent:
+        functs +=extra%d
+      else:
+        functs += search%d
+    self._allJSFiles.append(fileName)
+    with open(fullfileName, 'w') as parent:
       parent.write("""
 /*
   Base Object for dictionaries.
@@ -292,6 +302,16 @@ function %(name)s(data){
 %(name)s.prototype.getKeys = function(){
   return Object.keys(this.data);
 }
+%(name)s.prototype.generalSearch = function(reg,term,repl,feature, d=this.data){
+  var matches ={}
+  for (var key in d){
+    var x= d[key][feature]
+    if(x.indexOf(term)>-1){
+      matches[key] = x.replace(reg,repl)
+    }
+  }
+  return matches;
+}
 
 /**
  * Gives the generic type for a given type.
@@ -302,27 +322,11 @@ function getGenericType(type){
     return %(gen)s[type];
 }
    """%{"theVars":variables,"getterFunctions":functs, 
-        "gen": typeName, "name":self._dictParent})
+        "gen": typeName, "name":name})
 
+  # Write out the class for SequenceTypes
   def _writeModSeqParent(self):
-    fileName= "%s%s.js"%(self._theDir,self._modSeqParent)
-    self._allJSFiles.append("%s.js"%(self._modSeqParent))
-    with open(fileName, 'w') as parent:
-      parent.write("""
-/* 
- Base object for thing of the type: 
- ._ModuleSequenceType - i.e. paths,endpaths.sequences 
- It also inherits from DictParent.           
-*/                                          
-function %(name)s(data,topLevel, nameList,indexList){ 
-  this.data = data; 
-  this.topLevelData=topLevel;// e.g. pathNames to module names 
-  this.fixedNameList = nameList; // e.g.names of paths 
-  this.modulesToNameIndex = indexList; 
-  // e.g. module names and list of numbers
-  // corresponding to paths in the namelist.
-}
-%(name)s.prototype = new %(dict)s(this.data);
+    f = """
 /**
  * Gives the direct children
  * @param {String} a path name
@@ -330,46 +334,22 @@ function %(name)s(data,topLevel, nameList,indexList){
  */
 %(name)s.prototype.getModules = function(name){ 
   return this.topLevelData[name][this.ParametersKey];
-} 
-/**
- * Gives all paths a module is a child of.
- * @param {String} a module name 
- * @returns {Array} list of path names.
- */
-%(name)s.prototype.getPaths= function(theMod){
-  var listOfIndexes = this.modulesToNameIndex[theMod];     
-  var resultingPaths =[];
-  for (var i=0; i < listOfIndexes.length; i++){
-    resultingPaths.push(this.fixedNameList[i])
-  } 
-  return resultingPaths;        
-} 
-%(name)s.prototype.getKeys = function(){
-  return Object.keys(this.topLevelData)
 }
 %(name)s.prototype.getTopFile = function(key){
   return this.topLevelData[key][this.FileKey];
 }
-
-    """%{"name": self._modSeqParent, "dict": self._dictParent})
-
-  #TODO duplicate code
-  def _writeProdConsum(self):
-    fileName= "%s%s.js"%(self._theDir,self._prodConsumParent)
-    self._allJSFiles.append("%s.js"%(self._prodConsumParent))
-    with open(fileName, 'w') as parent:
-      parent.write("""
-/* 
- Base object for thing of the type: 
- ._ModuleSequenceType - i.e. paths,endpaths.sequences 
- It also inherits from DictParent.           
-*/                                          
-function %(name)s(data,topLevel, nameList,indexList){ 
-  this.data = data; 
-  this.topLevelData=topLevel;// e.g. pathNames to module names 
-  this.fixedNameList = nameList; // e.g.names of paths 
+%(name)s.prototype.searchType = function(reg,term,replce){
+  return this.generalSearch(reg,term,replce,this.TypeKey, this.topLevelData);
 }
-%(name)s.prototype = new %(dict)s(this.data);
+%(name)s.prototype.searchFile = function(reg,term,replce){
+  return this.generalSearch(reg,term,replce,this.FileKey, this.topLevelData);
+}
+"""
+    self._complexBase(self._modSeqP, f)
+
+  # Write out the class for producers and consumers.
+  def _writeProdConsum(self):
+    f= """
 /**
  * Gives the direct children
  * @param {String} a path name
@@ -378,14 +358,55 @@ function %(name)s(data,topLevel, nameList,indexList){
 %(name)s.prototype.getModules = function(name){ 
   return this.topLevelData[name];
 }
-%(name)s.prototype.getKeys = function(){
-  return Object.keys(this.topLevelData)
-}
 %(name)s.prototype.getTopFile = function(key){
   return this.getFile(key);
 }
+// Producer and consumer have different structure to rest.
+// Dont have file and type with them..
+// to get file and type we need to take each name, 
+//look up the moduledata and find matches.
+%(name)s.prototype.generalSearch = function(reg,term,repl, feature){
+  var matches ={}
+  for (var key in this.topLevelData){
+    var x = this.data[key][feature]
+    if(x.indexOf(term)>-1){
+      matches[key] = x.replace(reg,repl)
+    }
+  }
+  return matches;
+}
+%(name)s.prototype.typeSearch = function(reg,term,replce){
+  return this.generalSearch(reg,term,replce,this.TypeKey);
+}
+%(name)s.prototype.fileSearch = function(reg,term,replce){
+  return this.generalSearch(reg,term,replce,this.FileKey);
+}
+  """
+    self._complexBase(self._prodConsP, f)
 
-    """%{"name": self._prodConsumParent, "dict": self._dictParent})
+  def _complexBase(self,parentName, extra):
+    name = parentName
+    data = self._parents[name]  
+    fileName, fullfilename= data["pfile"]
+    self._allJSFiles.append(fileName)
+    all = """
+/* 
+ Base object for thing of the type: 
+ It also inherits from DictParent.           
+*/                                          
+function %(name)s(data,topLevel, nameList,indexList){ 
+  this.data = data; 
+  this.topLevelData=topLevel;// e.g. pathNames to module names 
+  this.fixedNameList = nameList; // e.g.names of paths 
+}
+%(name)s.prototype = new %(dict)s(this.data);
+
+%(name)s.prototype.getKeys = function(){
+  return Object.keys(this.topLevelData)
+}
+      """+ extra
+    with open(fullfilename, 'w') as parent:
+      parent.write(all%{"name": name, "dict": self._dictP})
 
 # Helper function which gets parameter details.
 def getParameters(parameters):
@@ -498,7 +519,6 @@ class visitor:
   def _getType(self,val):
     return re.sub(self._reg, "", str(type(val))).split(".")[-2:]
 
-
   """
     Do Module Objects e.g. producers etc
   """
@@ -590,21 +610,35 @@ class html:
     js.insert(0,jqLocal)
     self._jqueryFile(jqName)
     self._printHtml(name,self._scripts(js),self._css(css, cssL),
-                    self._items(items))
+                    self._items(items), self._searchitems(items))
 
   def _scripts(self, js):
     x = """<script type="text/javascript" src="%s"></script>"""
     return "\n".join([x%(i) for i in js])
 
   def _items(self, items):
-    l = """<input type="radio" name="docType" value="%(n)s"
+    l = """<input type="radio" id="%(n)s" name="docType" value="%(n)s"
     data-base="%(d)s"data-files="%(f)s"/>
     <span name="Info" value="%(n)s">%(n)s </span>"""
     s= [l%({"n":x,"f":y["data-files"],"d":y["data-base"]})
         for x,y in items.iteritems()]
     return " ".join(s)
 
-  def _printHtml(self,name,scrip,css,items):
+  def _searchitems(self,items):
+    b= """<option name="searchTerm1" value="%(name)s">%(name)s</option>"""
+    options = " ".join([b%({"name": x})for x in items])
+    return """<form name="searchInput" onsubmit="return false;">
+      <input type="text" id="searchWord"/>
+      <select id="searchType">
+       %s
+      </select> 
+      <span id="addSearch"> </span>
+       <input type="submit" value="Search" id="search"/></form> 
+     <script>
+       document.getElementById("searchType").selectedIndex = -1;
+     </script>""" %(options)
+
+  def _printHtml(self,name,scrip,css,items, search):
     with open(name,'w') as htmlFile:
       htmlFile.write("""
 <!DOCTYPE html>
@@ -619,6 +653,7 @@ class html:
     %(css)s
   </head>
   <body>
+    %(search)s
     <div style="position: absolute; top: 0px; 
        right:0px; width: 100px; text-align:right;">
       <a href="javascript:void(0)" id="helpMouse"data-help="#help">help</a>
@@ -626,10 +661,7 @@ class html:
       target="_top">Contact</a>
     </div>
     <div id="help"> </div>
-    <a id="hide" style="cursor:default; color:#CCCCCC;" 
-      href="javascript:;" >Hide All</a>
-    <br/><br/>
-     <input type="checkbox" id="ShowFiles" value="File"/>Show module File.
+    <br/>
   <br/>
    <form>
      <table border="1" cellpadding="3" cellspacing="1">Choose one:
@@ -638,14 +670,18 @@ class html:
        </tr>
      </table>
    </form>
-   <br/>
+   <input type="checkbox" id="ShowFiles" value="File"/>Show file names
+   <br/><br/>
    <input type="submit" id="docSubmit" value="submit">
    <br/><br/>
-   <div id="current"></div>
+   <div id="current"></div><br/>
+   <div id="searchCount"></div>
+   <a id="hide" style="cursor:default; color:#CCCCCC;" 
+      href="javascript:;" >Hide All</a><br/>
    <div id="attachParams"></div>
   </body>
 </html>
-      """%{"s":scrip,"css":css,"items":items})
+      """%{"s":scrip,"css":css,"items":items, "search":search})
 
   def _css(self, css, cssLocal):
     with open(css, 'w') as cssfile:
@@ -697,7 +733,7 @@ ul {
 /* Header for what's showing */
 #current{
   color: #808080;
-   font-size:14;
+   font-size:12pt;
    text-decoration: underline; 
 }
 /* help settings */
@@ -709,16 +745,20 @@ ul {
   width:250px;
 }
 h5 {
-  font-style: normal;       
+  font-style: normal;   
   text-decoration: underline; 
   margin:0px;
-  font-size:10;
+  font-size:9pt;
 }
 h6 {
   margin:0px;
+  color:#666666;
 }
 #attachParams{
-color:#192B33;
+  color:#192B33;
+}
+em{
+  color:#FFA500;
 }
       """)
     return """<link href="%s" rel="stylesheet" \
@@ -733,6 +773,7 @@ var CURRENT_OBJ;
 var showParams = false
 var alreadyShowing = false
 var topClass = "Top"
+var searching = false
 // ---
 /*
  Functions used to abstract away name of function calls
@@ -756,16 +797,127 @@ function baseTopFile(inputs){
 }
 // ---
 /*
+  Current search only searches for top level things.
+*/
+$(document).on('click','#search', function(e){
+   searching = true
+   var first = $('#searchType :selected')
+   if(first.length ==0){ 
+     window.alert("Please chose a search type."); 
+     return;}
+   var doc = first.text()
+   var next = $('#searchType2 :selected').text()
+   var searchTerm = $('#searchWord').val()
+   var $elem = $("#"+doc)
+   setCURRENT_OBJ($elem)
+   var reg = new RegExp(searchTerm, 'g')
+   var fin = "<em>"+searchTerm+"</em>"
+   switch(next){
+   case "File":
+     $("#ShowFiles").prop('checked', true);
+     var items = CURRENT_OBJ.searchFile(reg,searchTerm,fin)
+     var matchCount= fileTypeSearch(doc,items,true)
+     break;
+   case "Type":
+     var items = CURRENT_OBJ.searchType(reg,searchTerm,fin)
+     var matchCount =fileTypeSearch(doc,items,false)
+     break
+   case "Name":
+     var matchCount = easySearch(searchTerm,reg, doc, fin)
+   }
+   $("#searchCount").html(matchCount+ " found.")
+  searching = false
+});
+/*
+  Used when searching top level elements.
+  i.e. Module names, path names etc.
+  We dont need to delve into any dictionaries, we just use the keys.
+*/
+function easySearch(term,reg, doc, fin){
+  var keys = CURRENT_OBJ.getKeys()
+  var matches = keys.filter(function(e, i, a){return (e.indexOf(term)>-1)})
+  var highlights = matches.map(function(e,i,a){
+                               return e.replace(reg, fin)})
+  addData(doc, highlights,matches)
+  return matches.length
+}
+
+/*
+  When searching type or file names of top level elements.
+*/
+function fileTypeSearch(doc,items,file){
+  var newFunct = function(name){return items[name]}
+  if(file){
+    var backup = baseFile
+    var backup2 = baseTopFile
+    baseFile = newFunct  
+    baseTopFile = newFunct
+  }
+  else {
+    var backup = baseType
+    baseType = newFunct
+  }
+  var matches = Object.keys(items)
+  addData(doc, matches)
+  if(file){
+    baseFile = backup
+    baseTopFile = backup2
+  }
+  else baseType = backup
+  return matches.length
+}
+/*
   Show something new!
 */
 
 $(document).on('click', '#docSubmit', function(e){
+  var $elem = $("[name='docType']:checked")
+  var docType =  $elem.attr("value");
+ //get the function we want and the lists
+ setCURRENT_OBJ($elem)
+ addData(docType, CURRENT_OBJ.getKeys());
+});
+
+$(document).on('click', "[name='searchTerm1']", function(e){
+  $("#addSearch").empty()
+  var name= $(this).text().toLowerCase();
+  var sel= jQuery('<select/>', {
+      id:"searchType2"
+  })
+  if(name =="modules"|| name == "producer"|| name == "consumer"){
+    var li =  ["Name", "Type", "File"]
+  }
+  else var li= ["Name", "File"]
+  for(var i in li){
+    var x = li[i]
+  jQuery('<option/>', {
+      name:"searchTerm2",
+      value:x,
+      text:x
+    }).appendTo(sel)
+   }
+  sel.appendTo("#addSearch")
+});
+
+function setCURRENT_OBJ($element){
+  var thefunction = $element.attr("data-base");
+  var list = $element.attr("data-files").split(" ");
+  var first = list[0]
+  if(list.length >1){
+    CURRENT_OBJ = window[thefunction](list[1], first)
+   } 
+  else{
+    CURRENT_OBJ = window[thefunction](first)
+  }
+}
+function addData(docType, data, dataNames=data){
   if(alreadyShowing){
+    if(!searching)$("#searchCount").html("")
+    $('#hide').css('color','#CCCCCC');
+    $('#hide').css('cursor','default');
     paramOptions(false)
     $(document.getElementsByTagName('body')).children('ul').remove();
   }
-  var $elem = $("[name='docType']:checked")
-  var docType =  $elem.attr("value");
   $("#current").html(docType)
   var gen = getGenericType(docType)
   var ty = docType
@@ -776,17 +928,6 @@ $(document).on('click', '#docSubmit', function(e){
   }
   var $LI = $(document.createElement('li')
    ).addClass("expand").addClass(ty).addClass(topClass);
-  // create the object that we need
-  //get the function we want and the lists
-  var thefunction = $elem.attr("data-base");
-  var list = $elem.attr("data-files").split(" ");
-  var first = list[0]
-  if(list.length >1){
-    CURRENT_OBJ = window[thefunction](list[1], first)
-   } 
-  else{
-    CURRENT_OBJ = window[thefunction](first)
-  }
   docType= docType.toLowerCase()
   var showTypes = false
   showParams = true
@@ -804,34 +945,34 @@ $(document).on('click', '#docSubmit', function(e){
       //showParams = true
       break;
   }
-  var $UL = addTopData(CURRENT_OBJ.getKeys(),$LI,showTypes)
+  var $UL = addTopData(data,$LI,showTypes,dataNames)
   alreadyShowing = true;
   $UL.appendTo('#attachParams');
-});
+}
 /*
  Used to add the top level data to html.
 */
-function addTopData(data,$LI,types){
+function addTopData(data,$LI,types,dataName=data){
   var $UL = $(document.createElement('ul'));
   var doNormalFile = false;
   var files = document.getElementById("ShowFiles").checked
   if(files){
     try{
-      baseTopFile(data[0])
+      baseTopFile(dataName[0])
     }
     catch(e){
       doNormalFile = true;
     }
   }
   for(var i=0; i < data.length;i++){
-    var n = data[i]
-    var t = n;
+    var n = dataName[i]
+    var t = data[i];
     if(types)t += " ("+baseType(n)+")"
     if(files){ 
       if(doNormalFile)var file = baseFile(n)
       else var file = baseTopFile(n)
       t += " ("+file+")"}
-    $UL.append($LI.clone().attr("data-name",n).text(t));
+    $UL.append($LI.clone().attr("data-name",n).html(t));
   }
   return $UL;
 }
@@ -956,11 +1097,8 @@ function addParams(obj, results){
   var parameters = results
   for(var i =0; i < parameters.length; i++){
     var all = parameters[i].slice();
-    var theName = all.shift(); 
-    if(all.length ==0)
-     var typ = baseType(theName)
-    else
-      var typ = all.pop()
+    var theName = all.shift();
+    var typ= !all.length ? baseType(theName): all.pop() 
     var text = theName+" ("+typ+")"
     if(fileChecked) text = getFile(theName, text)
     if(typeof(all[0]) == "object"){
@@ -1025,7 +1163,7 @@ $(document).on('click', '#ShowParams', function(e){
 $(document).on('click', '#hide', function(e){
   //make sure not called when not needed.
   if($(this).css('cursor')!='default'){  
-    var selec = $(".expanded."+topClass).children().hide()
+    var selec = $(".expanded."+topClass).children("ul").hide()
     toggleExpand($(".expanded."+topClass ),e)
     $(this).css('color','#CCCCCC');
     $(this).css('cursor','default');
@@ -1055,20 +1193,27 @@ $('span[name="Info"]').mouseover(function(){
 $("#helpMouse").hover(function(e) {
     $($(this).data("help")).css({
         right: 250,
-        top: e.pageY + 10
+        top: e.pageY + 20,
+        width: 300
     }).stop().show(100);
-    var title = "<h4>Info:</h4>"
+    var title = "<h6>(Read the README file!)</h6><h4>Info:</h4> "
      var expl = "<h5>Colour codes:</h5> <h6><ul><li class='Path'>pathName \
-</li></ul><ul><li class='Modules'>Modules (e.g. EDProducer,\
- EDFilter etc)</li></ul>\
-<ul><li class='Types'>Types (e.g. PSet)</li></ul>\
-<ul><li class='param'>ParameterName:<span class='value'> value</span>\
+</li></ul><ul><li class='Modules'>Modules (e.g. EDProducer, EDFilter etc)\
+</li></ul><ul><li class='Types'>Types (e.g. PSet)</li></ul><ul>\
+<li class='param'>ParameterName:<span class='value'> value</span>\
 <span class='type'>(type)</span></li></ul></h6>"
-   var info ="<h5>The data</h5><h6>The headings you can choose \
-from are what was collected from the config file.<br/><br/> \
-Any change to the config file means having to run the script again \
-and then refresh this page (if same output file was used).</h6>"
-   $($(this).data("help")).html(title+expl+info);
+   var info ="<h5>The data</h5><h6>The headings you can choose from are what\
+ was collected from the config file.<br/><br/> Any change to the config file\
+ means having to run the script again and then refresh this page (if same \
+output file was used).</h6><br/>"
+   var tSearch="<h5>Search</h5><h6>Currently can only search by listing \
+what items you would like to be searched, and then what part of each item.\
+<br/><br/> I.e. search the producers for certain names.</h6><br/>"
+   var problems = "<h5>HTML/JSON/JS issues</h5><h6>If content isn't loading,\
+or json files cannot be loaded due to browser security issues, try runing a \
+local server. Go to the dir that the html file is stored in and type: <br/>\
+<span class='Types'>'python -m SimpleHTTPServer'</span></h6><br/>"
+   $($(this).data("help")).html(title+expl+info+tSearch+ problems);
 }, function() {
     $($(this).data("help")).hide();
 });
@@ -1131,6 +1276,7 @@ genericTypes={}
 
 def doTypes(spec, generic):
   genericTypes[spec] = generic
+
 def JSONFormat(d):
   import json
   return json.dumps(d)
@@ -1144,8 +1290,10 @@ if __name__ == "__main__":
                   help="print minimal messages to stdout")
   parser.add_option("-o", "--html_file", dest="_htmlfile",
                     help="The output html file.", default="cfg-viewer.html")
-  parser.add_option("-d", "--store_helper", dest="_helper_dir",default="cfgViewerJS",
-                    help="Name of folder to store js,json and css files.")
+  #parser.add_option("-d", "--store_helper", dest="_helper_dir",
+  #  default="cfgViewerJS",
+  #                  help="Name of folder to store js,json and css files.")
+  _helper_dir = "cfgViewerJS"
   opts, args = parser.parse_args()
   if len(args)!=1:
     parser.error("Please provide one configuration file.")
@@ -1178,12 +1326,10 @@ if __name__ == "__main__":
   print "starting.."
   htmlF = opts._htmlfile
   htmldir= os.path.split(htmlF)[0]
-  helper = opts._helper_dir
+  helper = os.path.join(_helper_dir, "")
   if(htmldir):
-    helperdir = "%s/%s"%(htmldir, helper)
+    helperdir = os.path.join(htmldir, helper, "")
   else:
     helperdir = helper
   if not os.path.exists(helperdir):os.makedirs(helperdir)
-  unscheduled(cfg, htmlF, opts._quiet, helper+"/",helperdir+"/")
-  #end = time.clock()
-  #print end - start
+  unscheduled(cfg, htmlF, opts._quiet, helper,helperdir)
